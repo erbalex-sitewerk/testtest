@@ -1,0 +1,684 @@
+
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<!-- <link rel="stylesheet" href="bootstrap3/css/bootstrap.min.css" media="screen">  -->
+<link rel="stylesheet" href="http://netdna.bootstrapcdn.com/bootstrap/3.0.0/css/bootstrap.min.css">
+
+<title>JavaScript - on the green lawn</title>
+
+<script type="text/javascript">
+
+window.onload = LawnApp;
+
+function LawnApp() {  // all in here - lets grass it
+
+	// initialize vars to default and make them not pollute the global scope
+	// "user vars"
+	var canvasHeight        = 300;
+	var bladeHeightMin      =   0.5;      // min and max height of blades according to canvas height
+	var bladeHeightMax      =   0.9;  	
+	var bladeWidthMin       =  14;        // range of blade width
+	var bladeWidthMax       =  21;
+	var bladeCenterJitter   =   5;        // *bring in a little variation in density by jittering centers a bit
+	var bladesDensity       =   2;        // how tight the blades stand
+	var bladeGrowDie        = true;       // should the blades grow and die
+	var bladeLifespanMin    = 100;        // how long should they life in seconds
+	var bladeLifespanMax    = 999;
+	var ceilColorHorizon    = "#007FFF";  // azure
+	var ceilColorZenith     = "#87CEEB";  // skyblue
+	var bladeColorBase      = "#7CFC00";  // lawngreen
+	var bladeColorLumVar    =   0.3;      // luminance variety of blade colors
+	var showClouds          = true;       // add some clouds?
+	var cloudsCount         =   7;        // how many of them
+	var breezeMultiplikator =   6;        // blow up breeze effect from click/touch event on blades deflection angle
+	var globalBreeze        = false;      // does the applied breeze affect all blades or is it a local phenomenon
+	var runRandomDynamic    = false;      // add some breeze without click/touch events
+	var dynamicCounter      =   0;                 
+	var showDebug           = true;       // some verbosity
+	var performanceMode     =   4;        // concerning trigonometric calculation
+	                                      // 1: no optimization at all 
+	                                      // 2: use conventional Array lookup table
+	                                      // 3: use Float32Array lookup table - maybe not necessary - cause some browsers detect possible array optimization aspects
+	                                      // 4: use Int32Array and bitshift lookup table - maybe not necessary
+	
+	// "internal affairs"
+	var lawnOffset      = 100;            // offset left and right that lawn don't stop on canvas borders
+	var factorGradRad   = Math.PI / 180;  // how to make radians from grades for trigonometry
+	var possibleColors;                   // deprecated
+	var bitshift        =  12;            // assign bitshift for accuracy in lookup table
+	var bladesCenterStep;                 // holds the x-distance of blade centers according to canvasWidth/bladeWidthMin/bladesDensity
+	
+	
+	// just a test
+	var cloudCanvas = document.createElement('canvas');
+	cloudCanvas.width  = 100;
+	cloudCanvas.height = 100;
+	var ctx = cloudCanvas.getContext('2d');
+	ctx.beginPath();
+	ctx.fillStyle = "white";
+	ctx.arc(20, 20, 20, 0, 2 * Math.PI);
+	ctx.arc(40, 40, 20, 0, 2 * Math.PI);
+	ctx.fill();
+	
+	
+	
+	//generate lookup tables according to "performance mode"
+	switch(performanceMode){
+		case 1:  // awkward
+			break;
+		case 2:  // clumsy
+			var sinTable = new Array(180);
+			var cosTable = new Array(180);
+			for (var i=0; i <= 180; i++) {
+				sinTable[i] = Math.sin(i * factorGradRad);
+				cosTable[i] = Math.cos(i * factorGradRad);
+			}
+			break;
+		case 3:  // plain fare mode
+			var sinTableF = new Float32Array(180);
+			var cosTableF = new Float32Array(180);
+			for (var i=0; i <= 180; i++) {
+				sinTableF[i] = Math.sin(i * factorGradRad);
+				cosTableF[i] = Math.cos(i * factorGradRad);
+			}
+			break;
+		case 4:  // hopefully sophisticated mode
+			var sinTableI = new Int32Array(180);  // idea: use only integers and bitshift for division to push performance
+			var cosTableI = new Int32Array(180);  // concern: make table values bigger by bit shifting so that they matter
+			for (var i=0; i <= 180; i++) {        // undo it later in drawing loop
+				sinTableI[i] = Math.round(Math.sin(i * factorGradRad) * Math.pow(2, bitshift));
+				cosTableI[i] = Math.round(Math.cos(i * factorGradRad) * Math.pow(2, bitshift));
+			}
+			break;
+		default:
+			break;
+		}
+		
+	// -----------------------------------------------------------------------------------------------------
+	// helping functions - not always mine
+	// -----------------------------------------------------------------------------------------------------
+	
+	// remove css classes according to mobile/desktop and web/local enviroment
+	// to disable features not available
+	HTMLElement.prototype.removeClass = function(remove) {
+		var newClassName = "";
+		var i;
+		var classes = this.className.split(" ");
+		for(i = 0; i < classes.length; i++) {
+			if(classes[i] !== remove) {
+				newClassName += classes[i] + " ";
+			}
+		}
+		this.className = newClassName;
+	}
+
+	HTMLElement.prototype.addClass = function(add) {
+		this.className = this.className + " " + add;
+	}
+	
+	// taken from sitepoint.com  hex-hex color value, lum-luminosity factor -0.1=10% darker; 0.2=20% lighter
+	function ColorLuminance(hex, lum) {  
+		hex = String(hex).replace(/[^0-9a-f]/gi, '');  // validate hex string
+		if (hex.length < 6) {
+			hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+		}
+		lum = lum || 0;
+		var rgb = "#", c, i;  // convert to decimal and change luminosity
+		for (i = 0; i < 3; i++) {
+			c = parseInt(hex.substr(i*2,2), 16);
+			c = Math.round(Math.min(Math.max(0, c + (c * lum)), 255)).toString(16);
+			rgb += ("00"+c).substr(c.length);
+		}
+		return rgb;
+	}
+	
+	// get the offset from left browser border to adjust mouse event positions
+	function getPosition(element) {
+		var xPosition = 0;
+		var yPosition = 0;
+		while(element) {
+			xPosition += (element.offsetLeft - element.scrollLeft + element.clientLeft);
+			yPosition += (element.offsetTop - element.scrollTop + element.clientTop);
+			element = element.offsetParent;
+		}
+		return { x: xPosition, y: yPosition };
+	}
+		
+	// -----------------------------------------------------------------------------------------------------
+	// back to whistle
+	// -----------------------------------------------------------------------------------------------------			
+
+	// dom referrals - where to be verbose
+	var widthInfo     = document.getElementById("width");
+	var bladesInfo    = document.getElementById("blades");
+	var speedInfo     = document.getElementById("speed");
+	
+	// canvas referral - where to draw
+	var theCanvas = document.getElementById("canvas");
+	var canvasWidth, canvasHeight;
+	var context;      // drawing context
+	var ceilGradient; // beautify the background
+
+	function getSetUserVarsAndCanvas(){  // in a function for reuse - restart, a name in memory of objectiveC
+		theCanvas.width  = window.innerWidth;
+		// console.log(theCanvas.width);
+		theCanvas.height = parseInt(document.UserValues.UserHeight.value) || canvasHeight;
+
+		canvasWidth  = theCanvas.width;             // what's the canvas' size
+		canvasHeight = theCanvas.height;
+		context      = theCanvas.getContext("2d");  // get the drawing context
+
+		ceilGradient = context.createLinearGradient(0, 0, 0, canvasHeight); // vertical
+		ceilGradient.addColorStop(0, (document.UserValues.UserCeilColorZenith.value  || ceilColorZenith));
+		ceilGradient.addColorStop(1, (document.UserValues.UserCeilColorHorizon.value || ceilColorHorizon));
+		
+		// bladeHeightMin    = parseFloat(document.UserValues.UserBladeHeightMin.value)   || bladeHeightMin;
+		// bladeHeightMax    = parseFloat(document.UserValues.UserBladeHeightMax.value)   || bladeHeightMax;
+		// bladeWidthMin     = parseInt(document.UserValues.UserBladeWidthMin.value)      || bladeWidthMin;
+		// bladeWidthMax     = parseInt(document.UserValues.UserBladeWidthMax.value)      || bladeWidthMax;
+		// bladeCenterJitter = parseInt(document.UserValues.UserBladeCenterJitter.value)  || bladeCenterJitter;
+		// bladesDensity     = parseInt(document.UserValues.UserBladesDensity.value)      || bladesDensity;
+		// bladeGrowDie      = document.UserValues.UserBladeGrowDie.checked
+		// bladeLifespanMin  = parseInt(document.UserValues.UserBladeLifespanMin.value)   || bladeLifespanMin;
+		// bladeLifespanMax  = parseInt(document.UserValues.UserBladeLifespanMax.value)   || bladeLifespanMax;
+		bladeColorBase    = document.UserValues.UserBladeColorBase.value               || bladeColor;
+		bladeColorLumVar  = parseFloat(document.UserValues.UserBladeColorLumVar.value) || bladeColorLumVar;
+		
+		// showClouds          = document.UserValues.UserBladeColor.checked;
+		
+		// globalBreeze        = document.UserValues.UserGlobalBreeze.checked;
+		// breezeMultiplikator = parseInt(document.UserValues.UserBreezeMultiplikator.value) || breezeMultiplikator;
+		// runRandomDynamic    = document.UserValues.UserRunRandomDynamic.checked;
+		
+		// showDebug           = document.UserValues.UserShowDebug.checked;
+		// performanceMode     = document.UserValues.UserPerformanceMode.value || performanceMode;
+	};
+	getSetUserVarsAndCanvas(); // no self invoking function, maybe we need it again - restart
+	
+	// running local or via web - useful for webcam interaction possibility
+	switch(window.location.protocol) {
+		case "http:":
+		case "https:":
+			var web = true;
+			break;
+		case "file:":
+			var web = false;
+			break;
+		default:
+			var web = false;
+	}
+
+	// -----------------------------------------------------------------------------------------------------
+	// event handling
+	// -----------------------------------------------------------------------------------------------------
+	
+	var currentX  = 0;      // breeze coordinates now
+	var oldX      = 0;      // and then
+	var pressed   = false;  // mouse button pressed?
+	var blowForce;
+	
+	LawnUserRestart = function(){
+		RestartLawn();
+	}
+	
+	LawnRequestFullscreen = function(){  // nothing but the beauty
+		if (theCanvas.requestFullScreen) {
+		    theCanvas.requestFullScreen();
+		}
+		else if (theCanvas.mozRequestFullScreen) {
+		    theCanvas.mozRequestFullScreen();
+		}
+		else if (theCanvas.webkitRequestFullScreen) {
+		    theCanvas.webkitRequestFullScreen();
+		 }
+	}
+	
+	LawnRestoreDefaults = function(){
+		document.UserValues.UserHeight.value = 300;
+	}
+	
+	var onmobile   = document.getElementById("onmobile");
+	var ondesktop  = document.getElementById("ondesktop");
+	var fullscreen = document.getElementById("fullscreen");
+	
+	function MouseButtonDown (e){
+		oldX = e.pageX + lawnOffset;  // here is the breeze
+		pressed = true;
+	}
+		
+	function MouseButtonUp (){  // calm, no breeze
+		pressed = false;
+	}
+		
+	function MouseMoving (e){
+		e.preventDefault(); // in case of mobile plattform prevent scrolling (disturbs animation)
+		if (pressed) {	    // mouse is moving but is button pressed?
+			currentX = e.pageX + lawnOffset; // correct mouseX to blades due to Lawnoffset
+			blowForce = (oldX - currentX) * breezeMultiplikator;
+			if (globalBreeze) {
+				var runTrough = bladesCount - 1;
+				do { blades[runTrough].angle += blowForce; } while ( runTrough-- );  // best performing loop afaik
+			}
+			else {
+				var from = (currentX / bladesCenterStep) << 0; // = Math.floor(currentX / bladesCenterStep);
+				var to   = (oldX / bladesCenterStep) << 0;
+				if (blowForce < 0) {
+					for (var i = to; i < from; i++) {
+						blades[i].angle += blowForce;
+					}
+				}
+				else {
+					for (var i = from; i < to; i++) {
+						blades[i].angle += blowForce;
+					}
+				}
+			}
+			oldX = currentX;
+		}
+	}
+
+	// be interactive - either on desktop or on mobile
+	if (navigator.userAgent.match(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|"Windows Phone"/i)){
+		// yep we're on mobile
+		theCanvas.addEventListener("touchstart", MouseButtonDown);
+		theCanvas.addEventListener("touchend",   MouseButtonUp);
+		theCanvas.addEventListener("touchmove",  MouseMoving);
+		window.addEventListener("orientationchange", RestartLawn);
+		onmobile.removeClass("hidden"); // hide "Desktop" in document
+	}
+	else {  // on good old desktop
+		theCanvas.addEventListener("mousedown", MouseButtonDown);
+		theCanvas.addEventListener("mouseup",   MouseButtonUp);
+		theCanvas.addEventListener("mousemove", MouseMoving);
+		window.addEventListener("resize", RestartLawn);
+		ondesktop.removeClass("hidden");  // hide "Mobile" in document
+		fullscreen.removeClass("hidden"); // fullscreen available on desktop
+	}
+
+	function RestartLawn(){
+		getSetUserVarsAndCanvas();
+		populateLawn();
+	}
+	
+	
+	// -----------------------------------------------------------------------------------------------------
+	// populate lawn
+	// -----------------------------------------------------------------------------------------------------
+	var blades          = new Array();   // array of blades - the lawn
+	var bladesDrawOrder = new Array();   // to simulate a random z-index to the blades   
+	var clouds          = new Array();
+	var bladeBottom, bladesCountF, bladesCount;
+	
+	function populateLawn() {
+		blades.length          = 0;  // empty array if it was already in use
+		bladesDrawOrder.length = 0;  // detto
+		clouds.length          = 0;
+		
+		bladeBottom = canvasHeight;  // offset from ground?
+
+		bladesCountF = (canvasWidth + 2 * lawnOffset ) / bladeWidthMin * bladesDensity; // for later calculations avoiding rounding error
+		bladesCount  = bladesCountF + 0.5 | 0;  // = Math.round(bladesCountF);
+		
+		// some stats
+		widthInfo.innerText  = "width: " + canvasWidth + " px";
+		bladesInfo.innerText = bladesCount.toString() + " blades";
+
+		for (var i = 0; i< bladesCount; i++) {bladesDrawOrder[i] = i;}  // populate draworder in ascending order
+		// then shuffle...
+		var currentIndex = bladesDrawOrder.length, tempValue, randomIndex;
+		while (0 !== currentIndex) {                                     // While there remain elements to shuffle
+			randomIndex = Math.floor(Math.random() * currentIndex);  // Pick a remaining element
+			currentIndex -= 1;
+			tempValue = bladesDrawOrder[currentIndex];                    // And swap it with the current element
+			bladesDrawOrder[currentIndex] = bladesDrawOrder[randomIndex];
+			bladesDrawOrder[randomIndex] = tempValue;
+		}
+		// generate set of blades = the lawn
+		bladesCenterStep = (canvasWidth + 2 * lawnOffset) / bladesCountF;
+		var bladeCenterOffset, bladeCenter, bladeWidth, bladeHeight, bladeGrowVelocity, bladeColor;
+		for (var i = 0; i < bladesCount; i++) {
+			var bladeCenterOffset = Math.round(- bladeCenterJitter + (Math.random() * (bladeCenterJitter * 2)));
+			var bladeCenter = Math.round(i * bladesCenterStep + bladeCenterOffset - lawnOffset);
+			var bladeWidth  = Math.round(Math.random() * (bladeWidthMax - bladeWidthMin +1) + bladeWidthMin);
+			var bladeHeight = Math.floor(Math.random()*(canvasHeight*bladeHeightMax - canvasHeight*bladeHeightMin + 1) + canvasHeight*bladeHeightMin);
+			var bladeGrowVelocity = Math.random()*(2-1+1)+1;
+			var bladeLifespan = Math.round(Math.random()*(100000-50000+1)+50000);
+			var bladeColor  =  ColorLuminance(bladeColorBase, (-bladeColorLumVar + (Math.random() * (bladeColorLumVar * 2))));
+			blades[i] = new Blade(context, canvasHeight, bladeBottom, bladeCenter, bladeWidth, bladeHeight, bladeGrowVelocity, bladeColor, bitshift);
+		}
+		// now generate clouds
+		var cloudsDirection = Math.random() < .5 ? true : false;  // all clouds moving to right or left
+		for (var i = 0; i < cloudsCount; i++) {
+			clouds[i] = new Cloud(0, 0, canvasWidth * Math.random(), canvasHeight / 2 * Math.random() + 50, 3, "white", 1, Math.random() / 10, cloudsDirection);
+			// function Cloud(cloudHeight, cloudWidth, cloudX, CloudY, cloudComplexity, cloudColor, cloudAlpha, cloudSpeed, cloudMoveDirectionRight)
+		}
+	}
+	populateLawn();
+
+	
+	// -----------------------------------------------------------------------------------------------------
+	// the grass "class"
+	// -----------------------------------------------------------------------------------------------------
+	function Blade (context, canvasHeight, bladeBottom, bladeCenter, bladeWidth, bladeHeight, bladeGrowVelocity, bladeColor, bitshift){
+		this.context           = context;
+		this.canvasHeight      = canvasHeight;
+		this.bladeBottomY      = bladeBottom;
+
+		this.bladeCenter = bladeCenter;
+		this.bladeHeight = bladeHeight;
+
+		this.bladeColor = bladeColor;
+
+		this.bladeLeftBottomX  = Math.round(bladeCenter - bladeWidth / 2);
+		this.bladeRightBottomX = Math.round(bladeCenter + bladeWidth / 2);
+
+		this.bladeTopX         = bladeCenter;
+		this.bladeHeight       = bladeHeight;
+		this.bladeGrowVelocity = bladeGrowVelocity;
+		
+		this.bladeAge          = 0;
+		this.isAdult           = false;
+			
+		this.bladeTopY = 0;
+
+		this.bitshift = bitshift;
+			
+		this.rigidity = bladeHeight / canvasHeight;
+
+		this.angle = 90; // all blades start head up
+		this.deltaangle = 0;
+	}		
+	
+	Blade.prototype.constructor = Blade;
+	switch (performanceMode){
+		case 1:	Blade.prototype.draw = function(){
+				
+			};
+			break;
+		case 2:	Blade.prototype.draw = function(){
+			
+			};
+			break;
+		case 3:	Blade.prototype.draw = function(){
+				context.fillStyle = this.bladeColor;
+				context.globalAlpha = 0.9;
+				this.angle = this.angle < 0 ? 0 : this.angle > 180 ? 180 : this.angle; // limit bending
+				this.deltaangle = this.angle - 90;
+				this.angle = this.deltaangle == 0 ? this.angle : this.deltaangle > 0 ? (this.angle - 1 - (this.deltaangle >> 2)) : (this.angle - (this.deltaangle >> 2));
+				
+				if (!this.isAdult) {	//let ist grow until height is reached
+					this.bladeTopY += this.bladeGrowVelocity;	// individual grow rate
+					if (this.bladeTopY > this.bladeHeight) {this.isAdult = true};
+				}
+				
+				if (this.bladeAge < this.bladeLifespan) {
+					this.bladeAge++;
+				}
+				else {
+					this.bladeAge = 0;
+					this.isAdult  = false;
+					this.bladeTopY= 0;
+					console.log(this.bladeAge, this.bladeLifespan, " died");
+				}
+				
+				context.beginPath();
+				context.moveTo(this.bladeLeftBottomX,this.bladeBottomY);
+				context.quadraticCurveTo(this.bladeLeftBottomX, 
+					this.bladeBottomY - this.bladeTopY / 2, 
+					Math.floor(this.bladeCenter + this.bladeHeight * cosTableF[this.angle]), 
+					Math.floor(this.canvasHeight - this.bladeTopY * sinTableF[this.angle]));
+				context.quadraticCurveTo(this.bladeRightBottomX,
+					this.bladeBottomY - this.bladeTopY / 2,
+					this.bladeRightBottomX,
+					this.bladeBottomY);
+				context.lineTo(this.bladeLeftBottomX,this.bladeBottomY);
+				context.fill();
+			};
+			break;
+		case 4:	Blade.prototype.draw = function(){
+				context.fillStyle = this.bladeColor;
+				context.globalAlpha = 0.9;
+				this.angle = this.angle < 0 ? 0 : this.angle > 180 ? 180 : this.angle; // limit bending
+				this.deltaangle = this.angle - 90;
+				this.angle = this.deltaangle == 0 ? this.angle : this.deltaangle > 0 ? (this.angle - 1 - (this.deltaangle >> 2)) : (this.angle - (this.deltaangle >> 2));
+				
+				if (!this.isAdult) {	//let ist grow until height is reached
+					this.bladeTopY += this.bladeGrowVelocity;	// individual grow rate
+					if (this.bladeTopY > this.bladeHeight) {this.isAdult = true};
+				}
+				
+				context.beginPath();
+				context.moveTo(this.bladeLeftBottomX,this.bladeBottomY);
+				context.quadraticCurveTo(this.bladeLeftBottomX, 
+					this.bladeBottomY - (this.bladeTopY >> 1), // div by 2
+					this.bladeCenter + ((this.bladeHeight * cosTableI[this.angle]) >> this.bitshift), 
+					this.canvasHeight - ((this.bladeTopY * sinTableI[this.angle]) >> this.bitshift));					
+				context.quadraticCurveTo(this.bladeRightBottomX,
+					this.bladeBottomY - (this.bladeTopY >> 1),
+					this.bladeRightBottomX,
+					this.bladeBottomY);
+				context.lineTo(this.bladeLeftBottomX,this.bladeBottomY);
+				context.fill();
+			};
+			break;
+	
+	}
+	
+	// -----------------------------------------------------------------------------------------------------
+	// the cloud "class"
+	// -----------------------------------------------------------------------------------------------------
+	function Cloud(cloudHeight, cloudWidth, cloudX, cloudY, cloudComplexity, cloudColor, cloudAlpha, cloudSpeed, cloudMoveDirectionRight){
+		this.cloudHeight             = cloudHeight;
+		this.cloudWidth              = cloudWidth;
+		this.cloudX                  = cloudX;
+		this.cloudY                  = cloudY;
+		this.cloudComplexity         = cloudComplexity;
+		this.cloudColor              = cloudColor;
+		this.cloudAlpha              = cloudAlpha;
+		this.cloudSpeed              = cloudSpeed;
+		this.cloudMoveDirectionRight = cloudMoveDirectionRight;
+	}
+	
+	Cloud.prototype.constructor = Cloud;
+	Cloud.prototype.draw = function(){
+		context.globalAlpha = 1;
+		context.beginPath();
+		context.fillStyle = 'white';
+		context.fillRect(100+this.cloudX, this.cloudY, 100, 30);
+		context.arc(this.cloudX + 100, this.cloudY, 30, 0, 2 * Math.PI, false);	
+		context.arc(this.cloudX + 150, this.cloudY - 10, 40, 0, 2 * Math.PI, false);
+		context.arc(this.cloudX + 200, this.cloudY, 30, 0, 2 * Math.PI, false);
+		context.fill();
+		context.beginPath();
+		this.cloudMoveDirectionRight ? this.cloudX += this.cloudSpeed : this.cloudX -= this.cloudSpeed;
+	}
+	Cloud.prototype.gyroUpdate = function(gyroDirection, gyroSpeed){  // interactivitiy via gyro on mobile
+		this.cloudMoveDirectionRight = gyroDirection;
+		this.cloudSpeed              = gyroSpeed;
+	}
+
+	
+	// -----------------------------------------------------------------------------------------------------
+	// the loop
+	// -----------------------------------------------------------------------------------------------------
+	
+	// info.innerHTML =  window.innerWidth + " px lawn width @ density " +  bladesDensity + " = " + bladesCount + " blades";
+	var animationTime = 0;  // holding animation time consumption
+	  		
+	// heart of the matter		
+	function Loop (){
+		context.fillStyle = ceilGradient;
+		context.fillRect(0, 0, canvasWidth, canvasHeight);	// clear the canvas		
+		
+		if (runRandomDynamic) {  // a bit of magic dynamic
+			if (!pressed) {
+				if (dynamicCounter == 0) {
+				
+				}
+					
+					
+			var runTrough = bladesCount - 1;
+				do { 
+					blades[runTrough].angle += 0;
+					
+				} while ( runTrough-- );
+			}
+		}
+
+		var runThroughClouds = cloudsCount - 1;
+		var runThroughBlades = bladesCount - 1;
+		if (showDebug) {var zeit1s = new Date().getTime()};
+		context.drawImage(cloudCanvas,100,10);
+		do {clouds[runThroughClouds].draw();} while ( runThroughClouds--);  // best performing loop afaik
+		do {blades[bladesDrawOrder[runThroughBlades]].draw();} while ( runThroughBlades-- );
+		if (showDebug) {var zeit1e = new Date().getTime();
+				
+		animationTime += ((zeit1e - zeit1s) - animationTime);  // low pass filtered generation time
+		}
+	}
+
+	setInterval(Loop, 40);		// do it again and again - 25fps please
+	setInterval(function (){speedInfo.innerText = (animationTime) + " ms/loop avg"}, 1000);
+	
+}	
+	
+// TODO:
+// onresize!
+// if(window.innerHeight > window.innerWidth){
+//   alert("Please use Landscape!");
+//  }
+
+// // Listen for orientation changes
+//window.addEventListener("orientationchange", function() {
+  // Announce the new orientation number
+//  alert(window.orientation);
+//}, false);		
+
+// var pixels = new Uint8ClampedArray(64); // test!
+
+// cookie for settings	
+
+// restore dafault values
+		
+// change performance mode on the fly
+	
+// webcam gestures -> http://www.adobe.com/devnet/html5/articles/javascript-motion-detection.html
+
+// clouds gyro		
+// clouds trick set intelligent color for alpha simulation or canvas copy with alpha
+	
+// var sign = number > 0 ? 1 : number == 0 ? 0 : -1;	
+	
+// var rounded = (anyNum + 0.5) | 0;
+// to int floor:   << 0
+	
+</script>
+
+<style type="text/css">
+<!--
+
+body     {color:grey;}
+h1       {font-size:20px;
+          border:10px;
+          padding-left:10px;}
+.hidden  {display:none;}
+.augment {color:white;
+          background: #4479BA;
+          padding: 5px;}
+.top-buffer { margin-top:20px; }
+-->
+</style>
+
+
+</head>
+<body>
+<h1>JavaScript on the green lawn</h1>
+<canvas id="canvas">Your browser does not support HTML5 Canvas.</canvas>
+	
+<div class="container">
+	
+<span id="ondesktop" class="hidden label label-success">Press mouse and move to apply breeze</span>
+<span id="onmobile"  class="hidden label label-success">Touch and move to apply breeze<br/>pan device to influence clouds</span>
+<span id="width" class="label label-primary">width</span>
+<span id="blades" class="label label-primary">blades</span>
+<span id="speed" class="label label-info">?</span>
+
+		<p id="info"></p>
+
+
+	
+<button type="button" class="btn btn-danger" onclick="LawnUserRestart();">Restart</button>
+<button type="button hidden" class="btn btn-success" id="fullscreen" onclick="LawnRequestFullscreen();">Fullscreen</button>
+<button type="button" class="btn btn-warning" onclick="LawnRestoreDefaults();">Defaults</button>
+
+<hr>
+	
+<form name="UserValues">
+
+<div class="row">
+	<div class="col-xs-4 col-md-3">
+		<div class="input-group">
+			<span class="input-group-addon">LawnHeight</span>
+			<input type="number" class="form-control input-sm" name="UserHeight" value="300">
+			<span class="input-group-addon">px</span>
+		</div>
+	</div>
+</div>
+
+<hr>
+
+
+<div class="row">
+	<div class="col-xs-3 col-md-3">
+		<div class="input-group">
+			<span class="input-group-addon">Zenith</span>
+			<input type="color" class="form-control input-sm" name="UserCeilColorZenith" value="#87CEEB">
+		</div>
+	</div>
+	<div class="clearfix visible-xs"></div>
+	<div class="col-xs-3 col-md-3">
+		<div class="input-group">
+			<span class="input-group-addon">Horizon</span>
+			<input type="color" class="form-control input-sm" name="UserCeilColorHorizon" value="#007FFF">
+		</div>
+	</div>
+	<div class="clearfix visible-xs"></div>
+	<div class="col-xs-3 col-md-3">
+		<div class="input-group">
+			<span class="input-group-addon">Blade</span>
+			<input type="color" class="form-control input-sm" name="UserBladeColorBase" value="#7CFC00">
+		</div>
+	</div>
+	<div class="clearfix visible-xs"></div>
+	<div class="col-xs-3 col-md-3">
+		<div class="input-group">
+			<span class="input-group-addon">LumVar</span>
+			<select class="form-control input-sm" name="UserBladeColorLumVar">
+				<option value="0">0.0</option>
+				<option value=".1">0.1</option>
+				<option value=".2">0.2</option>
+				<option value=".3" selected>0.3</option>
+				<option value=".4">0.4</option>
+				<option value=".5">0.5</option>
+				<option value=".6">0.6</option>
+				<option value=".7">0.7</option>
+				<option value=".8">0.8</option>
+				<option value=".9">0.9</option>
+				<option value="1">1.0</option>
+			</select>
+
+		</div>
+	</div>
+</div>
+
+
+
+
+</form>	
+	
+</div>
+</body>
+</html>
